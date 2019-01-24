@@ -272,7 +272,7 @@ def harden_direction_matrix(image):
 @click.option('--resampling/--no-resampling', default=False, help='output image resampled in world coordinates')
 @click.option('--width', type=click.INT, default=None, help='output image width (px)')  # noqa
 @click.option('--height', type=click.INT, default=None, help='output image height (px)')  # noqa
-@click.option('--slices', type=click.INT, default=DEFAULT_NB_SLICES, help='number of slicer step for sampling (degrees)')  # noqa
+@click.option('--slices', type=click.INT, default=DEFAULT_NB_SLICES, help='number of step for sampling (slices)')  # noqa
 @click.version_option(version=__version__, prog_name='Create 2D thumbnails from 3D image.')  # noqa
 def process(in_dir, out_dir, width, height, slices, resampling):
 

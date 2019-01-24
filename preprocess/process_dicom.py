@@ -6,6 +6,7 @@ import itkTemplate
 import json
 import math
 import os
+import sys
 
 
 __version__ = '0.1.0'
@@ -101,7 +102,19 @@ def ImageSeriesReader(*args, **kwargs):
     numberOfComponents = imageIO.GetNumberOfComponents()
     PixelType = itkTemplate.itkTemplate._pixelTypeFromIO(
         pixel, component, numberOfComponents)
-    ImageType = itk.Image[PixelType, dimension]
+    # Test if image type is wrapped, and if not, try `float` as
+    # default component type.
+    try:
+        ImageType = itk.Image[PixelType, dimension]
+    except KeyError:
+        try:
+            PixelType = itkTemplate.itkTemplate._pixelTypeFromIO(
+                pixel, itk.F, numberOfComponents)
+            ImageType = itk.Image[PixelType, dimension]
+        except KeyError as e:
+            print("Input image pixel type not supported")
+            print(e)
+            sys.exit(1)
     ReaderType = itk.ImageSeriesReader[ImageType]
     return ReaderType.New(*args, **kwargs)
 

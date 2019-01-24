@@ -136,12 +136,22 @@ def get_filenames(in_dir):
 
 def rescale_dicom_image_intensity(image, meta_dict):
     try:
+        component_type = itk.template(image)[1][0]
+        # Values extracted from the DICOM image need to be casted
+        # to a type matching the image component type. There is no
+        # programmatic way to use the component CType to directly
+        # cast the DICOM field values, so we just hard-code the casting
+        # functions.
+        if component_type.name in ['float', 'double']:
+            cast_function = float
+        else:
+            cast_function = int
         # '0028|1050' is the DICOM window Center for display (string). It is
         # used to apply an intensity windowing filter.
-        center = int(float(meta_dict['0028|1050']))
+        center = cast_function(float(meta_dict['0028|1050']))
         # '0028|1050' is the DICOM window Width for display (string). It is
         # used to apply an intensity windowing filter.
-        width = int(float(meta_dict['0028|1051']))
+        width = cast_function(float(meta_dict['0028|1051']))
         intensity_winwdow_filter = itk.IntensityWindowingImageFilter.New(image)
         # ITK versions prior to ITK 5.0.0 beta 2 do not support passing tuples
         # directly as an argument of the `New()` function. Instead, we need to

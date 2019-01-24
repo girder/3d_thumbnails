@@ -6,6 +6,7 @@ import itkTemplate
 import json
 import math
 import os
+import sys
 
 
 __version__ = '0.1.0'
@@ -101,7 +102,19 @@ def ImageSeriesReader(*args, **kwargs):
     numberOfComponents = imageIO.GetNumberOfComponents()
     PixelType = itkTemplate.itkTemplate._pixelTypeFromIO(
         pixel, component, numberOfComponents)
-    ImageType = itk.Image[PixelType, dimension]
+    # Test if image type is wrapped, and if not, try `float` as
+    # default component type.
+    try:
+        ImageType = itk.Image[PixelType, dimension]
+    except KeyError:
+        try:
+            PixelType = itkTemplate.itkTemplate._pixelTypeFromIO(
+                pixel, itk.F, numberOfComponents)
+            ImageType = itk.Image[PixelType, dimension]
+        except KeyError as e:
+            print("Input image pixel type not supported")
+            print(e)
+            sys.exit(1)
     ReaderType = itk.ImageSeriesReader[ImageType]
     return ReaderType.New(*args, **kwargs)
 
@@ -123,12 +136,22 @@ def get_filenames(in_dir):
 
 def rescale_dicom_image_intensity(image, meta_dict):
     try:
+        component_type = itk.template(image)[1][0]
+        # Values extracted from the DICOM image need to be casted
+        # to a type matching the image component type. There is no
+        # programmatic way to use the component CType to directly
+        # cast the DICOM field values, so we just hard-code the casting
+        # functions.
+        if component_type.name in ['float', 'double']:
+            cast_function = float
+        else:
+            cast_function = int
         # '0028|1050' is the DICOM window Center for display (string). It is
         # used to apply an intensity windowing filter.
-        center = int(float(meta_dict['0028|1050']))
+        center = cast_function(float(meta_dict['0028|1050']))
         # '0028|1050' is the DICOM window Width for display (string). It is
         # used to apply an intensity windowing filter.
-        width = int(float(meta_dict['0028|1051']))
+        width = cast_function(float(meta_dict['0028|1051']))
         intensity_winwdow_filter = itk.IntensityWindowingImageFilter.New(image)
         # ITK versions prior to ITK 5.0.0 beta 2 do not support passing tuples
         # directly as an argument of the `New()` function. Instead, we need to
@@ -218,14 +241,40 @@ def compute_real_width_and_height(image, width, height):
     return width, height
 
 
+def get_isotropic_spacing(spacing):
+    mini = min(spacing)
+    isotropic_spacing = itk.Vector[itk.D,3]()
+    isotropic_spacing.Fill(mini)
+    return isotropic_spacing
+
+def harden_direction_matrix(image):
+    size = itk.size(image)
+    mini = itk.Point[itk.D, 3]()
+    mini.Fill(sys.float_info.max)
+    maxi = itk.Point[itk.D, 3]()
+    maxi.Fill(-sys.float_info.max)
+    for i in range(8):
+        index = [size[j] - 1 if ( i / 2**j ) % 2 else 0 for j in range(3)]
+        corner = image.TransformIndexToPhysicalPoint(index)
+        mini = [corner[j] if corner[j] < mini[j] else mini[j] for j in range(3)]
+        maxi = [corner[j] if corner[j] > maxi[j] else maxi[j] for j in range(3)]
+    spacing = get_isotropic_spacing(image.GetSpacing())
+    new_size = itk.Size[3]()
+    for i in range(3):
+        # +1 for size and +0.5 to transform floor into round
+        new_size[i] = int(math.floor( ( maxi[i] - mini[i]) / spacing[i] + 1.5 ))
+    return itk.ResampleImageFilter(image, OutputOrigin=mini, Size=new_size, OutputSpacing=spacing)
+
+
 @click.command()
 @click.argument('in_dir', type=click.Path(exists=True, file_okay=False))
 @click.argument('out_dir', type=click.Path(file_okay=False))
+@click.option('--resampling/--no-resampling', default=False, help='output image resampled in world coordinates')
 @click.option('--width', type=click.INT, default=None, help='output image width (px)')  # noqa
 @click.option('--height', type=click.INT, default=None, help='output image height (px)')  # noqa
-@click.option('--slices', type=click.INT, default=DEFAULT_NB_SLICES, help='number of slicer step for sampling (degrees)')  # noqa
+@click.option('--slices', type=click.INT, default=DEFAULT_NB_SLICES, help='number of step for sampling (slices)')  # noqa
 @click.version_option(version=__version__, prog_name='Create 2D thumbnails from 3D image.')  # noqa
-def process(in_dir, out_dir, width, height, slices):
+def process(in_dir, out_dir, width, height, slices, resampling):
 
     if not slices >= 2:
         raise Exception("`slices` must me greater or equal to 1.")
@@ -245,16 +294,21 @@ def process(in_dir, out_dir, width, height, slices):
     # per-slice basis to allow rescaling the image based on its global
     # minimum and maximum if `width` and `center` tags are not defined
     # in the DICOM. The output of this function is scaled between 0 and 255.
-    rescaled_image = rescale_dicom_image_intensity(image, meta_dict)
+    image = rescale_dicom_image_intensity(image, meta_dict)
 
-    width, height = compute_real_width_and_height(rescaled_image, width,
+    width, height = compute_real_width_and_height(image, width,
                                                   height)
 
-    image_dimension = rescaled_image.GetImageDimension()
+    image_dimension = image.GetImageDimension()
     # Verifies that input image is 3D. This allows to simplify the logic after.
     if image_dimension != INPUT_IMAGE_DIMENSION:
         raise Exception("Input must be a %dD image. %d dimensions found." % (
             INPUT_IMAGE_DIMENSION, image_dimension))
+
+    if resampling:
+        # Resample input image to harden direction matrix. Output image
+        # direction matrix is the identity matrix. The image is isotropic.
+        image = harden_direction_matrix(image)
 
     # Process each slice independently. This allows to only resample and
     # rescale the slices that will be saved at the end. NOTE: One could have
@@ -262,7 +316,7 @@ def process(in_dir, out_dir, width, height, slices):
     # end and only process requested regions, e.g. slice by slice. This method
     # would be useful if one wanted to resample the image in 3D instead of
     # processing each slice independently but is not necessary for now.
-    image_size = itk.size(rescaled_image)
+    image_size = itk.size(image)
 
     size_sampling_dim = image_size[SLICING_DIMENSION]
 
@@ -276,7 +330,7 @@ def process(in_dir, out_dir, width, height, slices):
 
     region.SetSize(new_size)
     CollapsedImageType = itk.Image[itk.template(
-        rescaled_image)[1][0], OUTPUT_IMAGE_DIMENSION]
+        image)[1][0], OUTPUT_IMAGE_DIMENSION]
 
     list_indices = []
     for ii in range(slices):
@@ -286,8 +340,8 @@ def process(in_dir, out_dir, width, height, slices):
 
         region.SetIndex(image_index)
         slice_image_filter = itk.ExtractImageFilter[
-            rescaled_image, CollapsedImageType].New(
-            rescaled_image, ExtractionRegion=region)
+            image, CollapsedImageType].New(
+            image, ExtractionRegion=region)
         slice_image_filter.SetDirectionCollapseToIdentity()
         slice_image_filter.Update()
 
